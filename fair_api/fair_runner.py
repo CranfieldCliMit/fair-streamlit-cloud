@@ -295,7 +295,7 @@ def run_fair_custom_single_gas_emissions(
         raise ValueError("Custom run: forcing still contains NaNs after filling (Solar/Volcanic etc.).")
 
     f.run()
-    return _extract_timeseries_aligned_on_timepoints(f, scenario)
+    return _extract_outputs(f, scenario)
 
 def run_fair_multi_reduction_scenario(
     base_scenario: str,
