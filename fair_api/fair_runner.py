@@ -222,8 +222,8 @@ def run_fair_rcmip_scenario(scenario: str, start_year: int = 1850, end_year: int
 def run_fair_custom_single_gas_emissions(
     gas: str,
     df: pd.DataFrame,
-    start_year: Optional[int] = None,
-    end_year: Optional[int] = None,
+    start_year: int | None = None,
+    end_year: int | None = None,
 ) -> dict:
     gas = gas.upper().strip()
     if "year" not in df.columns:
@@ -241,52 +241,61 @@ def run_fair_custom_single_gas_emissions(
     scenario = "custom"
     f = _init_fair(scenario, start_year, end_year, fill_rcmip=False)
 
-    # ---- CRITICAL: ensure ALL emissions are numeric (no NaNs) ----
+    # ---- CRITICAL: no NaNs anywhere in drivers ----
     f.emissions.loc[dict(scenario=scenario, config="default")] = 0.0
+    f.forcing.loc[dict(scenario=scenario, config="default")] = 0.0
 
-    years = np.asarray(f.timepoints, dtype=int)
-    years = np.ravel(years)
+    years_model = np.asarray(f.timepoints, dtype=int)
 
     def build_series(col: str) -> np.ndarray:
         if col not in df.columns:
             raise ValueError(f"Missing required column '{col}' for gas {gas}.")
-        s = pd.Series(df[col].values, index=df["year"].values).astype(float)
-        s = s.reindex(years).interpolate(limit_direction="both").fillna(0.0)
+        s = pd.Series(df[col].values.astype(float), index=df["year"].values.astype(int))
+        s = s.reindex(years_model).interpolate(limit_direction="both").fillna(0.0)
         return s.to_numpy(dtype=float)
 
-    # Select which specie name FaIR expects
     def set_emissions(specie_name: str, values: np.ndarray):
         if specie_name in f.emissions.specie.values:
             f.emissions.loc[dict(scenario=scenario, config="default", specie=specie_name)] = values
 
-    if gas == "CH4":
-        values = build_series("ch4")
-        set_emissions("CH4", values)
-        set_emissions("methane", values)
+    if gas == "CO2":
+        if "co2_total" in df.columns:
+            v = build_series("co2_total")
+            set_emissions("CO2 FFI", v)
+            set_emissions("CO2 AFOLU", np.zeros_like(v))
+            set_emissions("carbon_dioxide", v)
+        else:
+            # allow split columns too
+            if "co2_fossil" not in df.columns and "co2_afolu" not in df.columns:
+                raise ValueError("For CO2, provide 'co2_total' OR 'co2_fossil'/'co2_afolu'.")
+            if "co2_fossil" in df.columns:
+                set_emissions("CO2 FFI", build_series("co2_fossil"))
+            if "co2_afolu" in df.columns:
+                set_emissions("CO2 AFOLU", build_series("co2_afolu"))
+
+    elif gas == "CH4":
+        v = build_series("ch4")
+        set_emissions("CH4", v)
+        set_emissions("methane", v)
 
     elif gas == "N2O":
-        values = build_series("n2o")
-        set_emissions("N2O", values)
-        set_emissions("nitrous_oxide", values)
-
-    elif gas == "CO2":
-        # accept co2_total as simplest
-        values = build_series("co2_total")
-        # CO2 in FaIR can be split. Put total into FFI and 0 in AFOLU.
-        set_emissions("CO2 FFI", values)
-        set_emissions("CO2 AFOLU", np.zeros_like(values))
-        set_emissions("carbon_dioxide", values)
+        v = build_series("n2o")
+        set_emissions("N2O", v)
+        set_emissions("nitrous_oxide", v)
 
     else:
         raise ValueError("gas must be one of: CO2, CH4, N2O")
 
-    # Safety check: no NaNs anywhere
+    # Final hard safety check
     em = np.asarray(f.emissions.sel(scenario=scenario, config="default").values)
+    forc = np.asarray(f.forcing.sel(scenario=scenario, config="default").values)
     if np.isnan(em).any():
-        raise ValueError("Custom emissions still contain NaNs after filling. Please check your input CSV years/values.")
+        raise ValueError("Custom run: emissions still contain NaNs after filling.")
+    if np.isnan(forc).any():
+        raise ValueError("Custom run: forcing still contains NaNs after filling (Solar/Volcanic etc.).")
 
     f.run()
-    return _extract_outputs(f, scenario)
+    return _extract_timeseries_aligned_on_timepoints(f, scenario)
 
 def run_fair_multi_reduction_scenario(
     base_scenario: str,
