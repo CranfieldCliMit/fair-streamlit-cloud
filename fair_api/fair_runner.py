@@ -38,61 +38,77 @@ from fair.io import read_properties
 # - _fill_climate_from_csv(f, config, calib_path) defined elsewhere in this file
 
 
+from pathlib import Path
+import shutil
+import pooch
+
+from fair import FAIR
+from fair.interface import initialise
+from fair.io import read_properties
+
+
+def _ensure_rcmip_cached() -> None:
+    """
+    Put the RCMIP CSVs (stored in our repo under data/rcmip/) into FaIR's pooch cache
+    so that FAIR.fill_from_rcmip() finds them locally and does NOT download from Zenodo.
+    """
+    repo_rcmip_dir = Path(__file__).resolve().parents[1] / "data" / "rcmip"
+
+    # These filenames must match exactly what FaIR expects.
+    files = [
+        "rcmip-emissions-annual-means-v5-1-0.csv",
+        "rcmip-concentrations-annual-means-v5-1-0.csv",
+        "rcmip-radiative-forcing-annual-means-v5-1-0.csv",
+    ]
+
+    missing = [f for f in files if not (repo_rcmip_dir / f).exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing required RCMIP file(s) in data/rcmip/:\n"
+            + "\n".join(f"- {repo_rcmip_dir / f}" for f in missing)
+        )
+
+    # FaIR uses pooch cache. This is typically ~/.cache/fair on linux.
+    cache_dir = Path(pooch.os_cache("fair"))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy repo files -> cache with the exact same names
+    for fname in files:
+        src = repo_rcmip_dir / fname
+        dst = cache_dir / fname
+        if not dst.exists() or dst.stat().st_size != src.stat().st_size:
+            shutil.copyfile(src, dst)
+
+
 def _init_fair(scenario: str, start_year: int, end_year: int, fill_rcmip: bool = True) -> FAIR:
     """
     Initialise FaIR for a given scenario and time range.
 
-    If fill_rcmip is True, fills emissions, concentrations, and forcing from
-    local RCMIP v5.1.0 CSV files stored in:
-        data/rcmip/
-
-    This avoids runtime downloads (which often fail on Streamlit Cloud).
+    Uses FAIR.fill_from_rcmip(), but avoids runtime downloads by caching RCMIP CSVs
+    from our repo into the pooch cache first.
     """
-    # --- Create model and define dimensions ---
     f = FAIR()
     f.define_time(start_year, end_year, 1)
     f.define_scenarios([scenario])
     f.define_configs(["default"])
 
-    # --- Define species and properties ---
     species, props = read_properties()
     f.define_species(species, props)
 
-    # --- Allocate arrays + fill species config defaults ---
     f.allocate()
     f.fill_species_configs()
 
-    # --- Fill inputs from local RCMIP files (recommended for Streamlit Cloud) ---
     if fill_rcmip:
-        base = Path(__file__).resolve().parents[1] / "data" / "rcmip"
-
-        emissions_file = base / "rcmip-emissions-annual-means-v5-1-0.csv"
-        concentration_file = base / "rcmip-concentrations-annual-means-v5-1-0.csv"
-        forcing_file = base / "rcmip-radiative-forcing-annual-means-v5-1-0.csv"
-
-        missing = [p for p in (emissions_file, concentration_file, forcing_file) if not p.exists()]
-        if missing:
-            raise FileNotFoundError(
-                "Missing required RCMIP file(s) in data/rcmip/:\n"
-                + "\n".join(f"- {p}" for p in missing)
-                + "\n\nMake sure you committed/pushed these files to GitHub."
-            )
-
-        # Fill from CSVs (emissions + concentration + forcing)
-        f.fill_from_csv(
-            emissions_file=str(emissions_file),
-            concentration_file=str(concentration_file),
-            forcing_file=str(forcing_file),
-        )
-
+        # Make sure FaIR can find the RCMIP CSVs locally (no Zenodo download)
+        _ensure_rcmip_cached()
+        f.fill_from_rcmip()
     else:
-        # If not using RCMIP, set emissions to zero to avoid NaNs.
-        # You can customize this branch for custom scenarios.
+        # Optional: zeros if you are building custom inputs later
         f.emissions.loc[dict(scenario=scenario, config="default")] = 0.0
         f.concentration.loc[dict(scenario=scenario, config="default")] = 0.0
         f.forcing.loc[dict(scenario=scenario, config="default")] = 0.0
 
-    # --- Initialise state variables ---
+    # Initialise state variables
     initialise(f.concentration, f.species_configs["baseline_concentration"])
     initialise(f.forcing, 0.0)
     initialise(f.temperature, 0.0)
@@ -100,7 +116,7 @@ def _init_fair(scenario: str, start_year: int, end_year: int, fill_rcmip: bool =
     initialise(f.airborne_emissions, 0.0)
     initialise(f.ocean_heat_content_change, 0.0)
 
-    # --- Apply calibrated climate parameters (your CSV) ---
+    # Your calibrated climate parameters
     _fill_climate_from_csv(f, config="default", calib_path=CALIB_PATH)
 
     return f
