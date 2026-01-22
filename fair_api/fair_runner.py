@@ -164,48 +164,49 @@ def _init_fair(scenario: str, start_year: int, end_year: int, fill_rcmip: bool =
 # Outputs expected by app.py
 # -----------------------------
 def _extract_outputs(f: FAIR, scenario: str) -> dict:
-    years = _to_year_array(f.timepoints)
+    years = np.asarray(f.timepoints, dtype=int)
+    n = len(years)
 
-    temp = _to_1d(f.temperature.sel(scenario=scenario, config="default").values)
+    def to_1d(da):
+        arr = np.asarray(da.values).squeeze()
+        if arr.shape[0] > n:
+            arr = arr[:n]
+        elif arr.shape[0] < n:
+            arr = np.pad(arr, (0, n - arr.shape[0]), constant_values=np.nan)
+        return arr
 
-    n = min(len(years), len(temp))
-    years = years[:n]
-    temp = temp[:n]
+    # ---- Temperature anomaly EXACTLY like local code ----
+    ts = f.temperature.sel(scenario=scenario, config="default", layer=0)
+    baseline_sel = ts.sel(timebounds=slice(1850, 1900))
+    baseline_mean = float(baseline_sel.mean("timebounds").values)
 
-    baseline_mask = (years >= 1850) & (years <= 1900)
-    if np.any(baseline_mask):
-        baseline = float(np.nanmean(temp[baseline_mask]))
-    else:
-        k = min(50, len(temp))
-        baseline = float(np.nanmean(temp[:k])) if k > 0 else 0.0
-    temp_anomaly = temp - baseline
+    temp_anom = to_1d(ts) - baseline_mean
 
+    # ---- Concentrations ----
     conc = {}
     for gas in ["CO2", "CH4", "N2O"]:
-        if gas in f.concentration.specie.values:
-            arr = _to_1d(f.concentration.sel(scenario=scenario, config="default", specie=gas).values)
-            conc[gas] = arr[:n]
-        else:
-            conc[gas] = np.full(n, np.nan, dtype=float)
+        conc[gas] = to_1d(
+            f.concentration.sel(scenario=scenario, config="default", specie=gas)
+        )
 
+    # ---- Forcing ----
     forc = {}
-    forcing_species = set(f.forcing.specie.values)
     for gas in ["CO2", "CH4", "N2O"]:
-        if gas in forcing_species:
-            arr = _to_1d(f.forcing.sel(scenario=scenario, config="default", specie=gas).values)
-            forc[gas] = arr[:n]
-        else:
-            forc[gas] = np.full(n, np.nan, dtype=float)
+        forc[gas] = to_1d(
+            f.forcing.sel(scenario=scenario, config="default", specie=gas)
+        )
 
-    total_forcing = _to_1d(f.forcing.sel(scenario=scenario, config="default").sum("specie").values)
-    total_forcing = total_forcing[:n]
+    total_forcing = to_1d(
+        f.forcing.sel(scenario=scenario, config="default").sum(dim="specie")
+    )
 
     return {
         "years": years,
-        "temp_anomaly": temp_anomaly,
+        "temp_anomaly": temp_anom,
         "conc": conc,
         "forc": forc,
         "total_forcing": total_forcing,
+        "baseline_mean": baseline_mean,
     }
 
 
