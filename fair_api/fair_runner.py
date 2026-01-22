@@ -28,41 +28,81 @@ def _fill_climate_from_csv(f: FAIR, config: str = "default", calib_path: str = C
     fill(f.climate_configs["forcing_4co2"], 8.0, config=config)
 
 
+from pathlib import Path
+from fair import FAIR
+from fair.interface import initialise
+from fair.io import read_properties
+
+# Assumes you already have:
+# - CALIB_PATH defined (Path or str)
+# - _fill_climate_from_csv(f, config, calib_path) defined elsewhere in this file
+
+
 def _init_fair(scenario: str, start_year: int, end_year: int, fill_rcmip: bool = True) -> FAIR:
     """
-    Initialise FaIR with species/properties and (optionally) fill emissions from local RCMIP CSV.
+    Initialise FaIR for a given scenario and time range.
+
+    If fill_rcmip is True, fills emissions, concentrations, and forcing from
+    local RCMIP v5.1.0 CSV files stored in:
+        data/rcmip/
+
+    This avoids runtime downloads (which often fail on Streamlit Cloud).
     """
+    # --- Create model and define dimensions ---
     f = FAIR()
     f.define_time(start_year, end_year, 1)
     f.define_scenarios([scenario])
     f.define_configs(["default"])
 
+    # --- Define species and properties ---
     species, props = read_properties()
     f.define_species(species, props)
+
+    # --- Allocate arrays + fill species config defaults ---
     f.allocate()
     f.fill_species_configs()
 
+    # --- Fill inputs from local RCMIP files (recommended for Streamlit Cloud) ---
     if fill_rcmip:
-        rcmip_emissions = Path(__file__).resolve().parents[1] / "data" / "rcmip" / "rcmip-emissions-annual-means-v5-1-0.csv"
-        if not rcmip_emissions.exists():
+        base = Path(__file__).resolve().parents[1] / "data" / "rcmip"
+
+        emissions_file = base / "rcmip-emissions-annual-means-v5-1-0.csv"
+        concentration_file = base / "rcmip-concentrations-annual-means-v5-1-0.csv"
+        forcing_file = base / "rcmip-radiative-forcing-annual-means-v5-1-0.csv"
+
+        missing = [p for p in (emissions_file, concentration_file, forcing_file) if not p.exists()]
+        if missing:
             raise FileNotFoundError(
-                f"Missing RCMIP emissions file at: {rcmip_emissions}. "
-                f"Add it to data/rcmip/ in your GitHub repo."
+                "Missing required RCMIP file(s) in data/rcmip/:\n"
+                + "\n".join(f"- {p}" for p in missing)
+                + "\n\nMake sure you committed/pushed these files to GitHub."
             )
-        f.fill_from_csv(emissions_file=str(rcmip_emissions))
+
+        # Fill from CSVs (emissions + concentration + forcing)
+        f.fill_from_csv(
+            emissions_file=str(emissions_file),
+            concentration_file=str(concentration_file),
+            forcing_file=str(forcing_file),
+        )
+
     else:
-        # If not using RCMIP, set emissions to zero for all species to avoid NaNs.
+        # If not using RCMIP, set emissions to zero to avoid NaNs.
+        # You can customize this branch for custom scenarios.
         f.emissions.loc[dict(scenario=scenario, config="default")] = 0.0
+        f.concentration.loc[dict(scenario=scenario, config="default")] = 0.0
+        f.forcing.loc[dict(scenario=scenario, config="default")] = 0.0
 
-    # recommended initialisation pattern
+    # --- Initialise state variables ---
     initialise(f.concentration, f.species_configs["baseline_concentration"])
-    initialise(f.forcing, 0)
-    initialise(f.temperature, 0)
-    initialise(f.cumulative_emissions, 0)
-    initialise(f.airborne_emissions, 0)
-    initialise(f.ocean_heat_content_change, 0)
+    initialise(f.forcing, 0.0)
+    initialise(f.temperature, 0.0)
+    initialise(f.cumulative_emissions, 0.0)
+    initialise(f.airborne_emissions, 0.0)
+    initialise(f.ocean_heat_content_change, 0.0)
 
+    # --- Apply calibrated climate parameters (your CSV) ---
     _fill_climate_from_csv(f, config="default", calib_path=CALIB_PATH)
+
     return f
 
 
