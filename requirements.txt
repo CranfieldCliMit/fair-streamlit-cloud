@@ -1,0 +1,6 @@
+fair
+numpy
+pandas
+xarray
+streamlit
+matplotlib

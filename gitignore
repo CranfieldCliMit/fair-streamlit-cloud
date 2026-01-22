@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Streamlit secrets (DO NOT COMMIT)
+.streamlit/secrets.toml
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
