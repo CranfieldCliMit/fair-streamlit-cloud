@@ -363,8 +363,8 @@ def run_fair_multi_reduction_scenario(
     red_out = _extract_outputs(f_red, base_scenario)
 
     # ---------- RETURN STRUCTURE APP EXPECTS ----------
-return {
+    return {
     "years": base_out["years"],   # or red_out["years"] (should match)
     "base": base_out,
     "reduced": red_out,
-}
+    }
