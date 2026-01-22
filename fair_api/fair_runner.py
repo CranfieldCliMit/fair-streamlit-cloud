@@ -225,8 +225,7 @@ def run_fair_custom_single_gas_emissions(
     start_year: Optional[int] = None,
     end_year: Optional[int] = None,
 ) -> dict:
-    # Keep your custom pathway as-is (single gas), independent from RCMIP
-    gas = gas.upper()
+    gas = gas.upper().strip()
     if "year" not in df.columns:
         raise ValueError("CSV must contain a 'year' column.")
 
@@ -242,41 +241,49 @@ def run_fair_custom_single_gas_emissions(
     scenario = "custom"
     f = _init_fair(scenario, start_year, end_year, fill_rcmip=False)
 
-    years = _to_year_array(f.timepoints)
+    # ---- CRITICAL: ensure ALL emissions are numeric (no NaNs) ----
+    f.emissions.loc[dict(scenario=scenario, config="default")] = 0.0
 
-    def set_series(specie_name: str, series: pd.Series):
-        if specie_name not in f.emissions.specie.values:
-            return
-        s = series.copy()
-        s.index = s.index.astype(int)
+    years = np.asarray(f.timepoints, dtype=int)
+    years = np.ravel(years)
+
+    def build_series(col: str) -> np.ndarray:
+        if col not in df.columns:
+            raise ValueError(f"Missing required column '{col}' for gas {gas}.")
+        s = pd.Series(df[col].values, index=df["year"].values).astype(float)
         s = s.reindex(years).interpolate(limit_direction="both").fillna(0.0)
-        f.emissions.loc[dict(scenario=scenario, config="default", specie=specie_name)] = s.to_numpy(dtype=float)
+        return s.to_numpy(dtype=float)
 
-    if gas == "CO2":
-        if "co2_total" not in df.columns:
-            raise ValueError("For CO2, provide column 'co2_total'.")
-        s = pd.Series(df["co2_total"].values, index=df["year"].values)
+    # Select which specie name FaIR expects
+    def set_emissions(specie_name: str, values: np.ndarray):
+        if specie_name in f.emissions.specie.values:
+            f.emissions.loc[dict(scenario=scenario, config="default", specie=specie_name)] = values
 
-        # try common names
-        set_series("CO2 FFI", s)
-        set_series("carbon_dioxide", s)
-
-    elif gas == "CH4":
-        if "ch4" not in df.columns:
-            raise ValueError("For CH4, provide column 'ch4'.")
-        s = pd.Series(df["ch4"].values, index=df["year"].values)
-        set_series("CH4", s)
-        set_series("methane", s)
+    if gas == "CH4":
+        values = build_series("ch4")
+        set_emissions("CH4", values)
+        set_emissions("methane", values)
 
     elif gas == "N2O":
-        if "n2o" not in df.columns:
-            raise ValueError("For N2O, provide column 'n2o'.")
-        s = pd.Series(df["n2o"].values, index=df["year"].values)
-        set_series("N2O", s)
-        set_series("nitrous_oxide", s)
+        values = build_series("n2o")
+        set_emissions("N2O", values)
+        set_emissions("nitrous_oxide", values)
+
+    elif gas == "CO2":
+        # accept co2_total as simplest
+        values = build_series("co2_total")
+        # CO2 in FaIR can be split. Put total into FFI and 0 in AFOLU.
+        set_emissions("CO2 FFI", values)
+        set_emissions("CO2 AFOLU", np.zeros_like(values))
+        set_emissions("carbon_dioxide", values)
 
     else:
         raise ValueError("gas must be one of: CO2, CH4, N2O")
+
+    # Safety check: no NaNs anywhere
+    em = np.asarray(f.emissions.sel(scenario=scenario, config="default").values)
+    if np.isnan(em).any():
+        raise ValueError("Custom emissions still contain NaNs after filling. Please check your input CSV years/values.")
 
     f.run()
     return _extract_outputs(f, scenario)
