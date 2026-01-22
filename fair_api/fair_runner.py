@@ -43,7 +43,8 @@ def _init_fair(scenario: str, start_year: int, end_year: int, fill_rcmip: bool =
     f.fill_species_configs()
 
     if fill_rcmip:
-        f.fill_from_rcmip()
+        RCMIP_EMISSIONS = Path(__file__).resolve().parents[1] / "data" / "rcmip" / "rcmip-emissions-annual-means-v5-1-0.csv"
+	f.fill_from_csv(emissions_file=str(RCMIP_EMISSIONS))
     else:
         # If not using RCMIP, set emissions to zero for all species to avoid NaNs.
         f.emissions.loc[dict(scenario=scenario, config="default")] = 0.0
