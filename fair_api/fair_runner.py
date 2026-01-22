@@ -280,7 +280,6 @@ def run_fair_custom_single_gas_emissions(
     f.run()
     return _extract_outputs(f, scenario)
 
-
 def run_fair_multi_reduction_scenario(
     base_scenario: str,
     reductions: Dict[str, float],
@@ -290,26 +289,34 @@ def run_fair_multi_reduction_scenario(
     end_year: int = 2100,
 ) -> dict:
     """
-    Returns:
+    Runs a baseline SSP (base) and a reduced-emissions scenario (reduced).
+    Returns a dict shaped exactly as app.py expects:
+
     {
-        "base": {...},
-        "reduced": {...}
+      "years": <np.ndarray>,
+      "base": <output dict from _extract_outputs>,
+      "reduced": <output dict from _extract_outputs>
     }
     """
 
-    # ---------- BASE RUN ----------
+    # -------------------------
+    # 1) BASELINE RUN
+    # -------------------------
     f_base = _init_fair(base_scenario, start_year, end_year, fill_rcmip=True)
     f_base.run()
     base_out = _extract_outputs(f_base, base_scenario)
 
-    # ---------- REDUCED RUN ----------
+    # -------------------------
+    # 2) REDUCED RUN
+    # -------------------------
     f_red = _init_fair(base_scenario, start_year, end_year, fill_rcmip=True)
 
-    years = _to_year_array(f_red.timepoints)
+    years = np.asarray(base_out["years"]).astype(int)
     n = len(years)
     window = max(1, reduction_end_year - reduction_start_year)
 
     def ramp_factor(year: int, r: float) -> float:
+        """Linear ramp to (1-r) between start and end years, then hold."""
         if year < reduction_start_year:
             return 1.0
         if year <= reduction_end_year:
@@ -317,6 +324,7 @@ def run_fair_multi_reduction_scenario(
             return 1.0 - r * frac
         return 1.0 - r
 
+    # Map user gas to likely FaIR emissions species names
     gas_to_species = {
         "CO2": ["CO2 FFI", "CO2 AFOLU", "carbon_dioxide"],
         "CH4": ["CH4", "methane"],
@@ -324,47 +332,54 @@ def run_fair_multi_reduction_scenario(
     }
 
     for gas, r in reductions.items():
-        gas = str(gas).upper()
+        gas = str(gas).upper().strip()
         r = float(r)
-        if r <= 0.0 or gas not in gas_to_species:
+
+        if r <= 0.0:
+            continue
+        if gas not in gas_to_species:
             continue
 
         for sp in gas_to_species[gas]:
             if sp not in f_red.emissions.specie.values:
                 continue
 
+            # Get emissions array (1D)
             arr = np.asarray(
                 f_red.emissions.sel(
                     scenario=base_scenario, config="default", specie=sp
                 ).values
-            ).squeeze()
-
+            )
             arr = np.ravel(arr)
+
             m = min(len(arr), n)
             arr = arr[:m].copy()
 
+            # Apply ramp
             for i in range(m):
                 arr[i] *= ramp_factor(int(years[i]), r)
 
-            out_arr = np.asarray(
+            # Write back
+            full = np.asarray(
                 f_red.emissions.sel(
                     scenario=base_scenario, config="default", specie=sp
                 ).values
-            ).squeeze()
+            )
+            full = np.ravel(full)
+            full[:m] = arr
 
-            out_arr = np.ravel(out_arr)
-            out_arr[:m] = arr
+            f_red.emissions.loc[dict(scenario=base_scenario, config="default", specie=sp)] = full
 
-            f_red.emissions.loc[
-                dict(scenario=base_scenario, config="default", specie=sp)
-            ] = out_arr
-
+    # Run reduced simulation and extract
     f_red.run()
     red_out = _extract_outputs(f_red, base_scenario)
 
-    # ---------- RETURN STRUCTURE APP EXPECTS ----------
+    # -------------------------
+    # Return structure expected by app.py
+    # -------------------------
     return {
-    "years": base_out["years"],   # or red_out["years"] (should match)
-    "base": base_out,
-    "reduced": red_out,
+        "years": base_out["years"],
+        "base": base_out,
+        "reduced": red_out,
     }
+
