@@ -269,46 +269,58 @@ def _init_fair(scenario: str, start_year: int, end_year: int, fill_rcmip: bool =
 # =========================================================
 
 def _extract_outputs(f: FAIR, scenario: str) -> dict:
-    # timepoints can be numpy array OR xarray coord depending on FaIR version
+    # timepoints may be numpy array OR xarray coord depending on FaIR version
     years = np.asarray(getattr(f.timepoints, "values", f.timepoints)).astype(int)
 
-    # Temperature (absolute)
+    # temperature -> force 1D
     temp = np.asarray(
         f.temperature.sel(scenario=scenario, config="default").values
-    ).squeeze()
+    )
+    temp = np.ravel(temp)
 
-    # Temperature anomaly relative to 1850–1900 (what your app plots)
+    # ---- FIX: Align lengths (prevents boolean mask mismatch) ----
+    n = min(len(years), len(temp))
+    years = years[:n]
+    temp = temp[:n]
+
+    # Temperature anomaly relative to 1850–1900
     baseline_mask = (years >= 1850) & (years <= 1900)
-    baseline = float(np.nanmean(temp[baseline_mask])) if np.any(baseline_mask) else float(np.nanmean(temp[:50]))
+    if np.any(baseline_mask):
+        baseline = float(np.nanmean(temp[baseline_mask]))
+    else:
+        k = min(50, len(temp))
+        baseline = float(np.nanmean(temp[:k])) if k > 0 else 0.0
+
     temp_anomaly = temp - baseline
 
-    # Concentrations: app expects out["conc"][gas] for CO2/CH4/N2O
+    # Concentrations: app expects out["conc"][gas]
     conc = {}
     for gas in ["CO2", "CH4", "N2O"]:
         if gas in f.concentration.specie.values:
-            conc[gas] = np.asarray(
+            arr = np.asarray(
                 f.concentration.sel(scenario=scenario, config="default", specie=gas).values
-            ).squeeze()
+            )
+            conc[gas] = np.ravel(arr)[:n]
         else:
-            # prevent KeyError in app.py
-            conc[gas] = np.full_like(years, np.nan, dtype=float)
+            conc[gas] = np.full(n, np.nan, dtype=float)
 
-    # Forcing: app expects out["forc"][gas] for CO2/CH4/N2O and out["total_forcing"] for Total
-    total_forcing = np.asarray(
-        f.forcing.sel(scenario=scenario, config="default").sum("specie").values
-    ).squeeze()
-
+    # Forcing: app expects out["forc"][gas]
     forc = {}
     forcing_species = set(f.forcing.specie.values)
-
     for gas in ["CO2", "CH4", "N2O"]:
         if gas in forcing_species:
-            forc[gas] = np.asarray(
+            arr = np.asarray(
                 f.forcing.sel(scenario=scenario, config="default", specie=gas).values
-            ).squeeze()
+            )
+            forc[gas] = np.ravel(arr)[:n]
         else:
-            # prevent KeyError in app.py
-            forc[gas] = np.full_like(years, np.nan, dtype=float)
+            forc[gas] = np.full(n, np.nan, dtype=float)
+
+    # Total forcing: app expects out["total_forcing"]
+    total_forcing = np.asarray(
+        f.forcing.sel(scenario=scenario, config="default").sum("specie").values
+    )
+    total_forcing = np.ravel(total_forcing)[:n]
 
     return {
         "years": years,
