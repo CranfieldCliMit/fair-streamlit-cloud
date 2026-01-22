@@ -289,10 +289,23 @@ def run_fair_multi_reduction_scenario(
     start_year: int = 1850,
     end_year: int = 2100,
 ) -> dict:
-    # Full SSP emissions from RCMIP, then adjust selected gases
-    f = _init_fair(base_scenario, start_year, end_year, fill_rcmip=True)
+    """
+    Returns:
+    {
+        "base": {...},
+        "reduced": {...}
+    }
+    """
 
-    years = _to_year_array(f.timepoints)
+    # ---------- BASE RUN ----------
+    f_base = _init_fair(base_scenario, start_year, end_year, fill_rcmip=True)
+    f_base.run()
+    base_out = _extract_outputs(f_base, base_scenario)
+
+    # ---------- REDUCED RUN ----------
+    f_red = _init_fair(base_scenario, start_year, end_year, fill_rcmip=True)
+
+    years = _to_year_array(f_red.timepoints)
     n = len(years)
     window = max(1, reduction_end_year - reduction_start_year)
 
@@ -317,10 +330,15 @@ def run_fair_multi_reduction_scenario(
             continue
 
         for sp in gas_to_species[gas]:
-            if sp not in f.emissions.specie.values:
+            if sp not in f_red.emissions.specie.values:
                 continue
 
-            arr = np.asarray(f.emissions.sel(scenario=base_scenario, config="default", specie=sp).values).squeeze()
+            arr = np.asarray(
+                f_red.emissions.sel(
+                    scenario=base_scenario, config="default", specie=sp
+                ).values
+            ).squeeze()
+
             arr = np.ravel(arr)
             m = min(len(arr), n)
             arr = arr[:m].copy()
@@ -328,10 +346,24 @@ def run_fair_multi_reduction_scenario(
             for i in range(m):
                 arr[i] *= ramp_factor(int(years[i]), r)
 
-            out_arr = np.asarray(f.emissions.sel(scenario=base_scenario, config="default", specie=sp).values).squeeze()
+            out_arr = np.asarray(
+                f_red.emissions.sel(
+                    scenario=base_scenario, config="default", specie=sp
+                ).values
+            ).squeeze()
+
             out_arr = np.ravel(out_arr)
             out_arr[:m] = arr
-            f.emissions.loc[dict(scenario=base_scenario, config="default", specie=sp)] = out_arr
 
-    f.run()
-    return _extract_outputs(f, base_scenario)
+            f_red.emissions.loc[
+                dict(scenario=base_scenario, config="default", specie=sp)
+            ] = out_arr
+
+    f_red.run()
+    red_out = _extract_outputs(f_red, base_scenario)
+
+    # ---------- RETURN STRUCTURE APP EXPECTS ----------
+    return {
+        "base": base_out,
+        "reduced": red_out,
+    }
