@@ -269,26 +269,58 @@ def _init_fair(scenario: str, start_year: int, end_year: int, fill_rcmip: bool =
 # =========================================================
 
 def _extract_outputs(f: FAIR, scenario: str) -> dict:
-    # timepoints may be an xarray coordinate or a numpy array depending on fair version
+    # timepoints may be xarray coord OR numpy array depending on fair version
     years = np.asarray(getattr(f.timepoints, "values", f.timepoints)).astype(int)
 
+    # temperature timeseries (absolute model temperature)
     temp = np.asarray(f.temperature.sel(scenario=scenario, config="default").values).squeeze()
 
+    # Temperature anomaly relative to 1850–1900 (as your app label says)
+    # Use mean over 1850-1900 inclusive, but only over years that exist
+    baseline_mask = (years >= 1850) & (years <= 1900)
+    if np.any(baseline_mask):
+        baseline = float(np.nanmean(temp[baseline_mask]))
+    else:
+        baseline = float(np.nanmean(temp[: min(len(temp), 51)]))  # fallback
+    temp_anom = temp - baseline
+
+    # Concentrations dictionary: app expects out["conc"][gas]
+    conc = {}
+    for gas in ["CO2", "CH4", "N2O"]:
+        if gas in f.concentration.specie.values:
+            conc[gas] = np.asarray(
+                f.concentration.sel(scenario=scenario, config="default", specie=gas).values
+            ).squeeze()
+
+    # Emissions dictionary (optional but handy; won't break app if unused)
+    emms = {}
+    # CO2 often split into FFI + AFOLU in FaIR
+    if "CO2 FFI" in f.emissions.specie.values:
+        emms["CO2 FFI"] = np.asarray(
+            f.emissions.sel(scenario=scenario, config="default", specie="CO2 FFI").values
+        ).squeeze()
+    if "CO2 AFOLU" in f.emissions.specie.values:
+        emms["CO2 AFOLU"] = np.asarray(
+            f.emissions.sel(scenario=scenario, config="default", specie="CO2 AFOLU").values
+        ).squeeze()
+    for gas in ["CH4", "N2O"]:
+        if gas in f.emissions.specie.values:
+            emms[gas] = np.asarray(
+                f.emissions.sel(scenario=scenario, config="default", specie=gas).values
+            ).squeeze()
+
+    # Total forcing (optional)
     total_forcing = np.asarray(
         f.forcing.sel(scenario=scenario, config="default").sum("specie").values
     ).squeeze()
 
-    co2_conc = None
-    if "CO2" in f.concentration.specie.values:
-        co2_conc = np.asarray(
-            f.concentration.sel(scenario=scenario, config="default", specie="CO2").values
-        ).squeeze()
-
     return {
         "years": years,
-        "temperature": temp,
-        "total_forcing": total_forcing,
-        "co2_concentration": co2_conc,
+        "temp": temp,                 # absolute temperature series
+        "temp_anomaly": temp_anom,    # ✅ what your app expects
+        "conc": conc,                 # ✅ what your app expects
+        "emms": emms,                 # optional
+        "forcing_total": total_forcing,  # optional
     }
 
 
