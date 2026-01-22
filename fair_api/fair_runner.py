@@ -39,48 +39,6 @@ from fair.io import read_properties
 
 
 from pathlib import Path
-import shutil
-import pooch
-
-from fair import FAIR
-from fair.interface import initialise
-from fair.io import read_properties
-
-
-def _ensure_rcmip_cached() -> None:
-    """
-    Put the RCMIP CSVs (stored in our repo under data/rcmip/) into FaIR's pooch cache
-    so that FAIR.fill_from_rcmip() finds them locally and does NOT download from Zenodo.
-    """
-    repo_rcmip_dir = Path(__file__).resolve().parents[1] / "data" / "rcmip"
-
-    # These filenames must match exactly what FaIR expects.
-    files = [
-        "rcmip-emissions-annual-means-v5-1-0.csv",
-        "rcmip-concentrations-annual-means-v5-1-0.csv",
-        "rcmip-radiative-forcing-annual-means-v5-1-0.csv",
-    ]
-
-    missing = [f for f in files if not (repo_rcmip_dir / f).exists()]
-    if missing:
-        raise FileNotFoundError(
-            "Missing required RCMIP file(s) in data/rcmip/:\n"
-            + "\n".join(f"- {repo_rcmip_dir / f}" for f in missing)
-        )
-
-    # FaIR uses pooch cache. This is typically ~/.cache/fair on linux.
-    cache_dir = Path(pooch.os_cache("fair"))
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    # Copy repo files -> cache with the exact same names
-    for fname in files:
-        src = repo_rcmip_dir / fname
-        dst = cache_dir / fname
-        if not dst.exists() or dst.stat().st_size != src.stat().st_size:
-            shutil.copyfile(src, dst)
-
-
-from pathlib import Path
 import pandas as pd
 
 from fair import FAIR
@@ -90,17 +48,12 @@ from fair.io import read_properties
 
 def _init_fair(scenario: str, start_year: int, end_year: int, fill_rcmip: bool = True) -> FAIR:
     """
-    Initialise FaIR and fill inputs from LOCAL RCMIP CSVs (no internet, no pooch).
-
-    This follows the same logic as the FaIR GitHub helper script:
-    - load RCMIP emissions + concentrations
-    - use FaIRv2.0.0-alpha_RCMIP_inputmap.csv to map variables
-    - populate f.emissions and f.concentration for the chosen SSP scenario
+    Initialise FaIR and fill inputs from LOCAL RCMIP CSVs using the FaIR mapping file.
+    Uses repo folders:
+      - data/rcmip/
+      - data/raux/   (your choice)
+    No pooch, no downloads, Streamlit Cloud safe.
     """
-
-    # ----------------------------
-    # 1) Build FaIR object
-    # ----------------------------
     f = FAIR()
     f.define_time(start_year, end_year, 1)
     f.define_scenarios([scenario])
@@ -112,13 +65,10 @@ def _init_fair(scenario: str, start_year: int, end_year: int, fill_rcmip: bool =
     f.allocate()
     f.fill_species_configs()
 
-    # ----------------------------
-    # 2) Fill from local RCMIP
-    # ----------------------------
     if fill_rcmip:
         root = Path(__file__).resolve().parents[1]
         rcmip_dir = root / "data" / "rcmip"
-        aux_dir = root / "data" / "raux"
+        aux_dir = root / "data" / "raux"  # ✅ matches your repo
 
         emms_path = rcmip_dir / "rcmip-emissions-annual-means-v5-1-0.csv"
         conc_path = rcmip_dir / "rcmip-concentrations-annual-means-v5-1-0.csv"
@@ -130,93 +80,122 @@ def _init_fair(scenario: str, start_year: int, end_year: int, fill_rcmip: bool =
                 "Missing required input file(s):\n" + "\n".join(f"- {p}" for p in missing)
             )
 
-        # Load mapping file (same one used in FaIR repo script)
         mapping = pd.read_csv(map_path, index_col=0)
 
-        # Load RCMIP data locally (NO URL)
-        rcmip_emms = pd.read_csv(emms_path).set_index(["Region", "Scenario", "Variable"])
-        rcmip_concs = pd.read_csv(conc_path).set_index(["Region", "Scenario", "Variable"])
+        # Load RCMIP locally
+        rcmip_emms = pd.read_csv(emms_path)
+        rcmip_concs = pd.read_csv(conc_path)
 
-        # --- helper: build FaIR emissions dataframe (years x FAIR_species) ---
+        # Clean column names (defensive)
+        rcmip_emms.columns = [str(c).strip() for c in rcmip_emms.columns]
+        rcmip_concs.columns = [str(c).strip() for c in rcmip_concs.columns]
+
+        # Set expected index
+        rcmip_emms = rcmip_emms.set_index(["Region", "Scenario", "Variable"])
+        rcmip_concs = rcmip_concs.set_index(["Region", "Scenario", "Variable"])
+
+        # Only numeric year columns
+        def year_cols(df):
+            return [c for c in df.columns if str(c).isdigit()]
+
+        years_needed = set(range(start_year, end_year + 1))
+
         def rcmip_to_fair_emms(ssp: str) -> pd.DataFrame:
             keys = mapping["RCMIP_emms_key"].dropna()
-            # Select World + scenario + required variables
+            ssp = str(ssp).strip()
+
+            # Filter base slice to validate scenario exists
+            try:
+                base = rcmip_emms.loc[("World", ssp)]
+            except KeyError:
+                # show what scenarios exist (limited)
+                scenarios = sorted(set(rcmip_emms.index.get_level_values("Scenario")))
+                raise ValueError(
+                    f"No RCMIP emissions rows for Region='World', Scenario='{ssp}'. "
+                    f"Example scenarios in file: {scenarios[:20]}"
+                )
+
+            available_vars = set(base.index.get_level_values("Variable"))
+            missing_vars = [v for v in keys.values if v not in available_vars]
+            if missing_vars:
+                raise ValueError(
+                    f"Missing emission variables for scenario '{ssp}' (first 30): {missing_vars[:30]}"
+                )
+
             sub = rcmip_emms.loc[("World", ssp, keys.values)]
             sub = sub.droplevel([0, 1])
+            sub = sub[year_cols(sub)]
 
-            # Year columns in RCMIP start after meta columns; safer: keep only numeric year columns
-            year_cols = [c for c in sub.columns if str(c).isdigit()]
-            sub = sub[year_cols]
-
-            # Map RCMIP variable -> FaIR variable name
             inv_map = {v: k for k, v in keys.to_dict().items()}
             sub.index = sub.index.map(inv_map)
 
-            # Apply scaling if present
-            if "RCMIP_emms_scaling" in mapping.columns:
-                scale = mapping.loc[sub.index, "RCMIP_emms_scaling"].astype(float)
-                sub = sub.T.mul(scale, axis=1).T
+            # scaling
+            scale = mapping.loc[sub.index, "RCMIP_emms_scaling"].astype(float)
+            sub = sub.T.mul(scale, axis=1).T
 
             out = sub.T
             out.index = out.index.astype(int)
-            out = out.apply(pd.to_numeric)
-            return out
+            out = out.loc[out.index.isin(years_needed)]
+            return out.apply(pd.to_numeric, errors="coerce")
 
-        # --- helper: build FaIR concentrations dataframe (years x FAIR_species) ---
         def rcmip_to_fair_concs(ssp: str) -> pd.DataFrame:
             keys = mapping["RCMIP_concs_key"].dropna()
+            ssp = str(ssp).strip()
+
+            try:
+                base = rcmip_concs.loc[("World", ssp)]
+            except KeyError:
+                scenarios = sorted(set(rcmip_concs.index.get_level_values("Scenario")))
+                raise ValueError(
+                    f"No RCMIP concentrations rows for Region='World', Scenario='{ssp}'. "
+                    f"Example scenarios in file: {scenarios[:20]}"
+                )
+
+            available_vars = set(base.index.get_level_values("Variable"))
+            missing_vars = [v for v in keys.values if v not in available_vars]
+            if missing_vars:
+                raise ValueError(
+                    f"Missing concentration variables for scenario '{ssp}' (first 30): {missing_vars[:30]}"
+                )
+
             sub = rcmip_concs.loc[("World", ssp, keys.values)]
             sub = sub.droplevel([0, 1])
-
-            year_cols = [c for c in sub.columns if str(c).isdigit()]
-            sub = sub[year_cols]
+            sub = sub[year_cols(sub)]
 
             inv_map = {v: k for k, v in keys.to_dict().items()}
             sub.index = sub.index.map(inv_map)
 
-            if "RCMIP_concs_scaling" in mapping.columns:
-                scale = mapping.loc[sub.index, "RCMIP_concs_scaling"].astype(float)
-                sub = sub.T.mul(scale, axis=1).T
+            scale = mapping.loc[sub.index, "RCMIP_concs_scaling"].astype(float)
+            sub = sub.T.mul(scale, axis=1).T
 
             out = sub.T
             out.index = out.index.astype(int)
-            out = out.apply(pd.to_numeric)
-            return out
+            out = out.loc[out.index.isin(years_needed)]
+            return out.apply(pd.to_numeric, errors="coerce")
 
         emms_df = rcmip_to_fair_emms(scenario)
         conc_df = rcmip_to_fair_concs(scenario)
 
-        # ----------------------------
-        # 3) Write into FaIR xarray arrays
-        # ----------------------------
-        # Ensure we only fill years that exist in our model time axis
-        years = set(range(start_year, end_year + 1))
-
         # Fill emissions
         for sp in emms_df.columns:
-            if sp in f.species:
-                series = emms_df[sp]
-                series = series[series.index.isin(years)]
+            if sp in f.emissions.specie.values:
+                series = emms_df[sp].dropna()
                 if not series.empty:
                     f.emissions.loc[dict(scenario=scenario, config="default", specie=sp, time=series.index)] = series.values
 
         # Fill concentrations
         for sp in conc_df.columns:
-            if sp in f.species:
-                series = conc_df[sp]
-                series = series[series.index.isin(years)]
+            if sp in f.concentration.specie.values:
+                series = conc_df[sp].dropna()
                 if not series.empty:
                     f.concentration.loc[dict(scenario=scenario, config="default", specie=sp, time=series.index)] = series.values
 
     else:
-        # Custom scenario mode (optional)
+        # Custom mode
         f.emissions.loc[dict(scenario=scenario, config="default")] = 0.0
         f.concentration.loc[dict(scenario=scenario, config="default")] = 0.0
         f.forcing.loc[dict(scenario=scenario, config="default")] = 0.0
 
-    # ----------------------------
-    # 4) Initialise state variables + climate calibration
-    # ----------------------------
     initialise(f.concentration, f.species_configs["baseline_concentration"])
     initialise(f.forcing, 0.0)
     initialise(f.temperature, 0.0)
