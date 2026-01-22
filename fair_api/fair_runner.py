@@ -269,9 +269,11 @@ def _init_fair(scenario: str, start_year: int, end_year: int, fill_rcmip: bool =
 # =========================================================
 
 def _extract_outputs(f: FAIR, scenario: str) -> dict:
-    years = f.timepoints.values.astype(int)
+    # timepoints may be an xarray coordinate or a numpy array depending on fair version
+    years = np.asarray(getattr(f.timepoints, "values", f.timepoints)).astype(int)
 
     temp = np.asarray(f.temperature.sel(scenario=scenario, config="default").values).squeeze()
+
     total_forcing = np.asarray(
         f.forcing.sel(scenario=scenario, config="default").sum("specie").values
     ).squeeze()
